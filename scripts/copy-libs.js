@@ -64,7 +64,8 @@ function main() {
   console.log('📦 Copying liblogos library to SDK...');
   
   const sdkDir = path.resolve(__dirname, '..');
-  const coreDir = path.resolve(sdkDir, '../../../logos-liblogos/build');
+  // Use the Nix build output in logos-js-sdk/result
+  const coreDir = path.resolve(sdkDir, 'result');
   
   // Define paths
   const libExtension = getLibraryExtension();
@@ -83,7 +84,7 @@ function main() {
     }
   } else {
     console.warn(`⚠️  Library not found at ${libSrc}`);
-    console.warn('   Please build the core library first: ./scripts/run_core.sh build');
+    console.warn('   Please build the JS SDK with Nix first (in logos-js-sdk): nix build');
     copySuccess = false;
   }
   
