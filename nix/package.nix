@@ -1,5 +1,5 @@
 # Package definition for logos-js-sdk
-{ pkgs, common, src, logosLiblogos }:
+{ pkgs, common, src, logosLiblogos, logosCapabilityModule }:
 
 pkgs.stdenv.mkDerivation rec {
   inherit (common) pname version nativeBuildInputs meta;
@@ -55,6 +55,23 @@ pkgs.stdenv.mkDerivation rec {
       mkdir -p $out/include
       cp -r "${logosLiblogos}/include"/* $out/include/
       echo "Copied headers from ${logosLiblogos}/include"
+    fi
+    
+    # Create modules directory and copy module plugins
+    mkdir -p $out/modules
+    
+    # Determine platform-specific plugin extension
+    OS_EXT="so"
+    case "$(uname -s)" in
+      Darwin) OS_EXT="dylib";;
+      Linux) OS_EXT="so";;
+      MINGW*|MSYS*|CYGWIN*) OS_EXT="dll";;
+    esac
+    
+    # Copy capability module plugin
+    if [ -f "${logosCapabilityModule}/lib/capability_module_plugin.$OS_EXT" ]; then
+      cp -L "${logosCapabilityModule}/lib/capability_module_plugin.$OS_EXT" "$out/modules/"
+      echo "Copied capability_module_plugin.$OS_EXT to $out/modules/"
     fi
     
     # Create a wrapper script for easy usage
