@@ -13,7 +13,10 @@
     "README.md",
     "lib/",
     "bin/",
-    "scripts/"
+    "scripts/",
+    "flake.nix",
+    "flake.lock",
+    "nix/"
   ],
   "keywords": [
     "logos",
