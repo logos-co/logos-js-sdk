@@ -1,16 +1,17 @@
-const ffi = require('ffi-napi');
-const ref = require('ref-napi');
+const koffi = require('koffi');
 const path = require('path');
 const fs = require('fs');
 
 /**
  * LogosAPI - A JavaScript SDK for interacting with liblogos_core
- * 
+ *
  * This class abstracts the FFI functionality needed to use liblogos including:
  * - Library loading and initialization
  * - Plugin management (processing, loading, unloading)
  * - Async method calls and event handling
  * - Event processing and lifecycle management
+ *
+ * Uses koffi for FFI (supports Node.js 16+, including v24).
  */
 class LogosAPI {
   constructor(options = {}) {
@@ -20,20 +21,16 @@ class LogosAPI {
       autoInit: options.autoInit !== false, // Default to true
       ...options
     };
-    
-    this.LogosCore = null;
+
+    this._lib = null;         // koffi library handle
+    this._fns = {};           // bound C functions
     this.isInitialized = false;
     this.isStarted = false;
     this.eventProcessingInterval = null;
     this.callbacks = new Map();
     this.eventListeners = new Map();
-    
-    // Define pointer types for C string arrays
-    this.StringArrayPtr = ref.refType(ref.types.CString);
-    
-    // Define callback type for async operations
-    this.AsyncCallback = ffi.Function('void', ['int', 'string', 'pointer']);
-    
+    this._registeredCallbacks = []; // prevent GC of koffi.register() handles
+
     if (this.options.autoInit) {
       this.init();
     }
@@ -57,7 +54,7 @@ class LogosAPI {
       }
     });
   }
-  
+
   /**
    * Initialize the LogosCore library
    */
@@ -65,7 +62,7 @@ class LogosAPI {
     if (this.isInitialized) {
       throw new Error('LogosAPI is already initialized');
     }
-    
+
     try {
       this._loadLibrary();
       this._initializeCore();
@@ -75,9 +72,9 @@ class LogosAPI {
       throw new Error(`Failed to initialize LogosAPI: ${error.message}`);
     }
   }
-  
+
   /**
-   * Load the liblogos_core library
+   * Load the liblogos_core library via koffi
    * @private
    */
   _loadLibrary() {
@@ -85,49 +82,78 @@ class LogosAPI {
     let libPath = this.options.libPath;
     if (!libPath) {
       const libExtension = this._getLibraryExtension();
-      // First try to use the SDK's own lib directory
-      libPath = path.resolve(__dirname, 'lib', `liblogos_core${libExtension}`);
-      
-      // Fall back to the original location if not found
-      if (!fs.existsSync(libPath)) {
-        libPath = path.resolve(__dirname, '../../../logos-liblogos/build/lib', `liblogos_core${libExtension}`);
+      const libName = `liblogos_core${libExtension}`;
+
+      const platformDir = this._getPlatformDir();
+
+      // Search order:
+      // 1. SDK's own lib/{platform}/ directory (multi-platform layout)
+      // 2. SDK's own lib/ directory (single-platform fallback)
+      // 3. LOGOS_LIBLOGOS_ROOT env var (fallback for dev environments)
+      // 4. Nix build output in SDK (result/lib/ — works for local file: deps)
+      const candidates = [
+        path.resolve(__dirname, 'lib', platformDir, libName),
+        path.resolve(__dirname, 'lib', libName),
+        process.env.LOGOS_LIBLOGOS_ROOT && path.join(process.env.LOGOS_LIBLOGOS_ROOT, 'lib', libName),
+        path.resolve(__dirname, 'result', 'lib', libName),
+      ].filter(Boolean);
+
+      libPath = candidates.find(p => fs.existsSync(p));
+
+      if (!libPath) {
+        throw new Error(
+          `liblogos_core not found. Searched:\n` +
+          candidates.map(p => `  - ${p}`).join('\n') + '\n' +
+          'Set LOGOS_LIBLOGOS_ROOT or pass libPath in constructor options.'
+        );
       }
     }
-    
-    // Check if the library file exists
-    if (!fs.existsSync(libPath)) {
-      throw new Error(`Library file not found at: ${libPath}. Please build the core library first.`);
-    }
-    
-    // Define the interface to liblogos_core
-    this.LogosCore = ffi.Library(libPath, {
-      // Core initialization and lifecycle
-      'logos_core_init': ['void', ['int', 'pointer']],
-      'logos_core_set_plugins_dir': ['void', ['string']],
-      'logos_core_start': ['void', []],
-      'logos_core_exec': ['int', []],
-      'logos_core_cleanup': ['void', []],
-      
+
+    // Load the shared library
+    this._lib = koffi.load(libPath);
+
+    // Define the async callback type: void (*)(int result, const char *message, void *user_data)
+    this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int result, const char *message, void *user_data)');
+
+    // Bind all C functions
+    const lib = this._lib;
+    this._fns = {
+      // Core lifecycle
+      init:                  lib.func('void logos_core_init(int argc, void *argv)'),
+      setMode:               lib.func('void logos_core_set_mode(int mode)'),
+      setPluginsDir:         lib.func('void logos_core_set_plugins_dir(const char *dir)'),
+      addPluginsDir:         lib.func('void logos_core_add_plugins_dir(const char *dir)'),
+      start:                 lib.func('void logos_core_start()'),
+      exec:                  lib.func('int logos_core_exec()'),
+      cleanup:               lib.func('void logos_core_cleanup()'),
+
       // Plugin management
-      'logos_core_get_loaded_plugins': [this.StringArrayPtr, []],
-      'logos_core_get_known_plugins': [this.StringArrayPtr, []],
-      'logos_core_load_plugin': ['int', ['string']],
-      'logos_core_unload_plugin': ['int', ['string']],
-      'logos_core_process_plugin': ['string', ['string']],
-      
-      // Async callback functions
-      'logos_core_async_operation': ['void', ['string', this.AsyncCallback, 'pointer']],
-      'logos_core_load_plugin_async': ['void', ['string', this.AsyncCallback, 'pointer']],
-      'logos_core_call_plugin_method_async': ['void', ['string', 'string', 'string', this.AsyncCallback, 'pointer']],
-      
-      // Event listener registration
-      'logos_core_register_event_listener': ['void', ['string', 'string', this.AsyncCallback, 'pointer']],
-      
-      // Qt event processing (non-blocking)
-      'logos_core_process_events': ['void', []]
-    });
+      getLoadedPlugins:      lib.func('void *logos_core_get_loaded_plugins()'),
+      getKnownPlugins:       lib.func('void *logos_core_get_known_plugins()'),
+      loadPlugin:            lib.func('int logos_core_load_plugin(const char *name)'),
+      loadPluginWithDeps:    lib.func('int logos_core_load_plugin_with_dependencies(const char *name)'),
+      unloadPlugin:          lib.func('int logos_core_unload_plugin(const char *name)'),
+      processPlugin:         lib.func('const char *logos_core_process_plugin(const char *path)'),
+
+      // Token management
+      getToken:              lib.func('const char *logos_core_get_token(const char *key)'),
+
+      // Module stats
+      getModuleStats:        lib.func('const char *logos_core_get_module_stats()'),
+
+      // Async operations
+      asyncOperation:        lib.func('void logos_core_async_operation(const char *data, AsyncCallback *cb, void *user_data)'),
+      loadPluginAsync:       lib.func('void logos_core_load_plugin_async(const char *name, AsyncCallback *cb, void *user_data)'),
+      callPluginMethodAsync: lib.func('void logos_core_call_plugin_method_async(const char *plugin, const char *method, const char *params, AsyncCallback *cb, void *user_data)'),
+
+      // Event listener
+      registerEventListener: lib.func('void logos_core_register_event_listener(const char *plugin, const char *event, AsyncCallback *cb, void *user_data)'),
+
+      // Qt event processing
+      processEvents:         lib.func('void logos_core_process_events()'),
+    };
   }
-  
+
   /**
    * Get the appropriate library extension for the current platform
    * @private
@@ -142,39 +168,72 @@ class LogosAPI {
         return '.so';
     }
   }
-  
+
+  /**
+   * Get the platform subdirectory name (e.g. "darwin-arm64", "linux-x64")
+   * @private
+   */
+  _getPlatformDir() {
+    return `${process.platform}-${process.arch}`;
+  }
+
   /**
    * Initialize the core system
    * @private
    */
   _initializeCore() {
-    // Initialize logos_core
-    this.LogosCore.logos_core_init(0, null);
-    
+    this._fns.init(0, null);
+
     // Set plugins directory
-    let pluginsDir = this.options.pluginsDir;
-    if (!pluginsDir) {
-      // Default to plugins directory in the calling application
-      pluginsDir = path.resolve(process.cwd(), 'plugins');
-      
-      // If not found, try other common locations
-      if (!fs.existsSync(pluginsDir)) {
-        pluginsDir = path.resolve(process.cwd(), 'modules');
-      }
-      
-      // Fall back to the original core location if not found
-      if (!fs.existsSync(pluginsDir)) {
-        pluginsDir = path.resolve(__dirname, '../../../logos-liblogos/build/modules');
-      }
-    }
-    
+    const pluginsDir = this._resolvePluginsDir();
+
     if (!fs.existsSync(pluginsDir)) {
-      throw new Error(`Plugins directory not found at: ${pluginsDir}. Please ensure plugins are available in your application directory.`);
+      throw new Error(`Plugins directory not found at: ${pluginsDir}. Please ensure modules are available.`);
     }
-    
-    this.LogosCore.logos_core_set_plugins_dir(pluginsDir);
+
+    // Auto-detect logos_host if not already set via env
+    this._resolveLogosHost(pluginsDir);
+
+    this._fns.setPluginsDir(pluginsDir);
   }
-  
+
+  /**
+   * Try to locate logos_host and set LOGOS_HOST_PATH env var.
+   * The C++ plugin_manager.cpp searches:
+   *   1. LOGOS_HOST_PATH env var
+   *   2. Next to running executable (won't work for Node.js)
+   *   3. ../bin/logos_host relative to plugins dir
+   * We help by setting the env var if we can find it.
+   * @private
+   */
+  _resolveLogosHost(pluginsDir) {
+    if (process.env.LOGOS_HOST_PATH && fs.existsSync(process.env.LOGOS_HOST_PATH)) {
+      return; // Already set and valid
+    }
+
+    const hostName = process.platform === 'win32' ? 'logos_host.exe' : 'logos_host';
+    const platformDir = this._getPlatformDir();
+    const candidates = [
+      // SDK's own bin/{platform}/ directory (multi-platform layout)
+      path.resolve(__dirname, 'bin', platformDir, hostName),
+      // SDK's own bin/ directory (single-platform fallback)
+      path.resolve(__dirname, 'bin', hostName),
+      // LOGOS_LIBLOGOS_ROOT/bin/ (fallback for dev environments)
+      process.env.LOGOS_LIBLOGOS_ROOT && path.join(process.env.LOGOS_LIBLOGOS_ROOT, 'bin', hostName),
+      // ../bin/logos_host relative to plugins dir (matches C++ fallback #3)
+      path.resolve(pluginsDir, '..', 'bin', hostName),
+      // Nix build output in SDK (result/bin/ — works for local file: deps)
+      path.resolve(__dirname, 'result', 'bin', hostName),
+      // Constructor option
+      this.options.logosHostPath,
+    ].filter(Boolean);
+
+    const found = candidates.find(p => fs.existsSync(p));
+    if (found) {
+      process.env.LOGOS_HOST_PATH = found;
+    }
+  }
+
   /**
    * Start the LogosCore system
    */
@@ -182,16 +241,16 @@ class LogosAPI {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized before starting');
     }
-    
+
     if (this.isStarted) {
       throw new Error('LogosAPI is already started');
     }
-    
-    this.LogosCore.logos_core_start();
+
+    this._fns.start();
     this.isStarted = true;
     return true;
   }
-  
+
   /**
    * Get the list of loaded plugins
    */
@@ -199,11 +258,11 @@ class LogosAPI {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
-    const loadedPluginsPtr = this.LogosCore.logos_core_get_loaded_plugins();
-    return this._convertCStringArrayToJS(loadedPluginsPtr);
+
+    const ptr = this._fns.getLoadedPlugins();
+    return this._readCStringArray(ptr);
   }
-  
+
   /**
    * Get the list of known plugins
    */
@@ -211,11 +270,11 @@ class LogosAPI {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
-    const knownPluginsPtr = this.LogosCore.logos_core_get_known_plugins();
-    return this._convertCStringArrayToJS(knownPluginsPtr);
+
+    const ptr = this._fns.getKnownPlugins();
+    return this._readCStringArray(ptr);
   }
-  
+
   /**
    * Get plugin status information
    */
@@ -225,38 +284,103 @@ class LogosAPI {
       known: this.getKnownPlugins()
     };
   }
-  
+
   /**
-   * Process a plugin file
+   * Resolve the effective plugins directory
+   * @private
+   */
+  _resolvePluginsDir() {
+    if (this.options.pluginsDir) {
+      return this.options.pluginsDir;
+    }
+
+    // Try common locations relative to cwd
+    for (const candidate of ['modules', 'plugins']) {
+      const dir = path.resolve(process.cwd(), candidate);
+      if (fs.existsSync(dir)) return dir;
+    }
+
+    // Fall back to SDK lib directory
+    const sdkModules = path.resolve(__dirname, 'lib', 'modules');
+    if (fs.existsSync(sdkModules)) return sdkModules;
+
+    return path.resolve(process.cwd(), 'modules');
+  }
+
+  /**
+   * Process a plugin file and add it to known plugins.
+   *
+   * Supports two directory layouts:
+   *   1. Subdirectory with manifest.json (current standard):
+   *        modules/calc_module/manifest.json
+   *        modules/calc_module/calc_module_plugin.so
+   *   2. Flat layout (legacy): modules/calc_module_plugin.so
+   *
    * @param {string} pluginName - Name of the plugin (without extension)
    */
   processPlugin(pluginName) {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
+
+    const pluginsDir = this._resolvePluginsDir();
     const pluginExtension = this._getLibraryExtension();
-    let pluginsDir = this.options.pluginsDir;
-    if (!pluginsDir) {
-      // Default to plugins directory in the calling application
-      pluginsDir = path.resolve(process.cwd(), 'plugins');
-      
-      // If not found, try other common locations
-      if (!fs.existsSync(pluginsDir)) {
-        pluginsDir = path.resolve(process.cwd(), 'modules');
-      }
-      
-      // Fall back to the original core location if not found
-      if (!fs.existsSync(pluginsDir)) {
-        pluginsDir = path.resolve(__dirname, '../../../logos-liblogos/build/modules');
+
+    // Strategy 1: subdirectory with manifest.json (current standard)
+    const manifestPath = path.join(pluginsDir, pluginName, 'manifest.json');
+    if (fs.existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        const mainObj = manifest.main;
+        if (mainObj && typeof mainObj === 'object') {
+          const variants = this._platformVariants();
+          let mainLib = null;
+          for (const variant of variants) {
+            if (mainObj[variant]) { mainLib = mainObj[variant]; break; }
+          }
+          if (mainLib) {
+            const pluginPath = path.join(pluginsDir, pluginName, mainLib);
+            if (fs.existsSync(pluginPath)) {
+              const result = this._fns.processPlugin(pluginPath);
+              return !!result;
+            }
+          }
+        }
+      } catch (e) {
+        // Fall through to legacy layout
       }
     }
-    const pluginPath = path.join(pluginsDir, `${pluginName}_plugin${pluginExtension}`);
-    
-    const result = this.LogosCore.logos_core_process_plugin(pluginPath);
-    return !!result;
+
+    // Strategy 2: flat layout (legacy)
+    const flatPath = path.join(pluginsDir, `${pluginName}_plugin${pluginExtension}`);
+    if (fs.existsSync(flatPath)) {
+      const result = this._fns.processPlugin(flatPath);
+      return !!result;
+    }
+
+    throw new Error(
+      `Plugin "${pluginName}" not found. Checked:\n` +
+      `  - ${manifestPath}\n` +
+      `  - ${flatPath}`
+    );
   }
-  
+
+  /**
+   * Return platform variant strings in preference order (matches logoscore convention).
+   * @private
+   */
+  _platformVariants() {
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+    switch (process.platform) {
+      case 'darwin':
+        return [`darwin-${arch === 'aarch64' ? 'arm64' : arch}`, `darwin-${arch}`];
+      case 'win32':
+        return [`windows-${arch}`];
+      default: // linux
+        return [`linux-${arch}`];
+    }
+  }
+
   /**
    * Load a plugin
    * @param {string} pluginName - Name of the plugin
@@ -265,11 +389,11 @@ class LogosAPI {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
-    const result = this.LogosCore.logos_core_load_plugin(pluginName);
+
+    const result = this._fns.loadPlugin(pluginName);
     return result === 1;
   }
-  
+
   /**
    * Unload a plugin
    * @param {string} pluginName - Name of the plugin
@@ -278,11 +402,79 @@ class LogosAPI {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
-    const result = this.LogosCore.logos_core_unload_plugin(pluginName);
+
+    const result = this._fns.unloadPlugin(pluginName);
     return result === 1;
   }
-  
+
+  /**
+   * Load a plugin and all its dependencies automatically.
+   * @param {string} pluginName - Name of the plugin
+   */
+  loadPluginWithDependencies(pluginName) {
+    if (!this.isInitialized) {
+      throw new Error('LogosAPI must be initialized first');
+    }
+
+    const result = this._fns.loadPluginWithDeps(pluginName);
+    return result === 1;
+  }
+
+  /**
+   * Add an additional plugins directory to scan.
+   * @param {string} dir - Directory path containing module subdirectories
+   */
+  addPluginsDir(dir) {
+    if (!this.isInitialized) {
+      throw new Error('LogosAPI must be initialized first');
+    }
+
+    this._fns.addPluginsDir(dir);
+  }
+
+  /**
+   * Set the SDK communication mode.
+   * @param {number} mode - 0 = Remote (default, uses logos_host processes), 1 = Local (in-process)
+   */
+  setMode(mode) {
+    if (!this.isInitialized) {
+      throw new Error('LogosAPI must be initialized first');
+    }
+
+    this._fns.setMode(mode);
+  }
+
+  /**
+   * Get a token by key from the core token manager.
+   * @param {string} key - Token key
+   * @returns {string|null} Token value or null if not found
+   */
+  getToken(key) {
+    if (!this.isInitialized) {
+      throw new Error('LogosAPI must be initialized first');
+    }
+
+    return this._fns.getToken(key);
+  }
+
+  /**
+   * Get module statistics (CPU and memory usage) for all loaded modules.
+   * @returns {object|null} Parsed JSON stats or null on error
+   */
+  getModuleStats() {
+    if (!this.isInitialized) {
+      throw new Error('LogosAPI must be initialized first');
+    }
+
+    const json = this._fns.getModuleStats();
+    if (!json) return null;
+    try {
+      return JSON.parse(json);
+    } catch (_e) {
+      return json;
+    }
+  }
+
   /**
    * Process and load a plugin in one step
    * @param {string} pluginName - Name of the plugin
@@ -292,23 +484,22 @@ class LogosAPI {
     if (!processed) {
       throw new Error(`Failed to process plugin: ${pluginName}`);
     }
-    
+
     const loaded = this.loadPlugin(pluginName);
     if (!loaded) {
       throw new Error(`Failed to load plugin: ${pluginName}`);
     }
-    
+
     return true;
   }
-  
+
   /**
    * Process and load multiple plugins
    * @param {string[]} pluginNames - Array of plugin names
    */
   processAndLoadPlugins(pluginNames) {
     const results = {};
-    
-    // First process all plugins
+
     for (const pluginName of pluginNames) {
       try {
         results[pluginName] = { processed: this.processPlugin(pluginName) };
@@ -316,8 +507,7 @@ class LogosAPI {
         results[pluginName] = { processed: false, error: error.message };
       }
     }
-    
-    // Then load all plugins
+
     for (const pluginName of pluginNames) {
       if (results[pluginName].processed) {
         try {
@@ -328,69 +518,58 @@ class LogosAPI {
         }
       }
     }
-    
+
     return results;
   }
-  
+
   /**
    * Call a plugin method asynchronously
    * @param {string} pluginName - Name of the plugin
    * @param {string} methodName - Name of the method
    * @param {string} params - JSON string of parameters
-   * @param {Function} callback - Callback function (result, message) => {}
+   * @param {Function} callback - Callback function (success, message, meta) => {}
    */
   callPluginMethodAsync(pluginName, methodName, params, callback) {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
+
     const callbackId = this._generateCallbackId();
-    const ffiCallback = this._createFFICallback(callback, callbackId);
-    
-    this.callbacks.set(callbackId, { callback, ffiCallback });
-    
-    this.LogosCore.logos_core_call_plugin_method_async(
-      pluginName,
-      methodName,
-      params,
-      ffiCallback,
-      null
-    );
-    
+    const registered = this._createRegisteredCallback(callback, callbackId);
+
+    this.callbacks.set(callbackId, { callback, registered });
+
+    this._fns.callPluginMethodAsync(pluginName, methodName, params, registered, null);
+
     return callbackId;
   }
-  
+
   /**
    * Register an event listener
    * @param {string} pluginName - Name of the plugin
    * @param {string} eventName - Name of the event
-   * @param {Function} callback - Callback function (result, message) => {}
+   * @param {Function} callback - Callback function (success, message, meta) => {}
    */
   registerEventListener(pluginName, eventName, callback) {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
+
     const listenerId = this._generateCallbackId();
-    const ffiCallback = this._createFFICallback(callback, listenerId);
-    
-    this.eventListeners.set(listenerId, { 
-      pluginName, 
-      eventName, 
-      callback, 
-      ffiCallback 
-    });
-    
-    this.LogosCore.logos_core_register_event_listener(
+    const registered = this._createRegisteredCallback(callback, listenerId);
+
+    this.eventListeners.set(listenerId, {
       pluginName,
       eventName,
-      ffiCallback,
-      null
-    );
-    
+      callback,
+      registered
+    });
+
+    this._fns.registerEventListener(pluginName, eventName, registered, null);
+
     return listenerId;
   }
-  
+
   /**
    * Start event processing loop
    * @param {number} interval - Processing interval in milliseconds (default: 100)
@@ -399,16 +578,16 @@ class LogosAPI {
     if (this.eventProcessingInterval) {
       throw new Error('Event processing is already running');
     }
-    
+
     this.eventProcessingInterval = setInterval(() => {
-      if (this.LogosCore) {
-        this.LogosCore.logos_core_process_events();
+      if (this._fns.processEvents) {
+        this._fns.processEvents();
       }
     }, interval);
-    
+
     return true;
   }
-  
+
   /**
    * Stop event processing loop
    */
@@ -420,7 +599,7 @@ class LogosAPI {
     }
     return false;
   }
-  
+
   /**
    * Execute the core event loop (blocking)
    */
@@ -428,51 +607,55 @@ class LogosAPI {
     if (!this.isInitialized) {
       throw new Error('LogosAPI must be initialized first');
     }
-    
-    return this.LogosCore.logos_core_exec();
+
+    return this._fns.exec();
   }
-  
+
   /**
    * Clean up and shutdown
    */
   cleanup() {
     this.stopEventProcessing();
-    
-    if (this.LogosCore) {
-      this.LogosCore.logos_core_cleanup();
+
+    if (this._fns.cleanup) {
+      this._fns.cleanup();
     }
-    
-    // Clear all callbacks
+
+    // Unregister all koffi callbacks
+    for (const handle of this._registeredCallbacks) {
+      try { koffi.unregister(handle); } catch (_e) { /* ignore */ }
+    }
+    this._registeredCallbacks = [];
+
     this.callbacks.clear();
     this.eventListeners.clear();
-    
+
     this.isInitialized = false;
     this.isStarted = false;
   }
-  
+
+  // ===== Private helpers =====
+
   /**
-   * Convert C string array to JavaScript array
+   * Read a null-terminated char** array from a C pointer into a JS string array.
+   * koffi.decode(ptr, offset, 'char *') does one dereference: reads the char*
+   * at ptr+offset, follows it to the string. Returns null for the NULL terminator.
    * @private
    */
-  _convertCStringArrayToJS(cStringArray) {
+  _readCStringArray(ptr) {
     const result = [];
-    if (cStringArray.isNull()) {
-      return result;
+    if (!ptr) return result;
+
+    const ptrSize = koffi.sizeof('void *');
+    for (let i = 0; ; i++) {
+      const str = koffi.decode(ptr, i * ptrSize, 'char *');
+      if (!str) break;
+      result.push(str);
     }
-    
-    let i = 0;
-    while (true) {
-      const stringPtr = cStringArray.readPointer(i * ref.sizeof.pointer);
-      if (stringPtr.isNull()) {
-        break;
-      }
-      result.push(stringPtr.readCString());
-      i++;
-    }
-    
+
     return result;
   }
-  
+
   /**
    * Generate a unique callback ID
    * @private
@@ -480,26 +663,38 @@ class LogosAPI {
   _generateCallbackId() {
     return `callback_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
-  
+
   /**
-   * Create an FFI callback wrapper
+   * Create a registered koffi callback (persists beyond the C function call).
    * @private
    */
-  _createFFICallback(userCallback, callbackId) {
-    return ffi.Callback('void', ['int', 'string', 'pointer'], 
-      (result, message, userData) => {
+  _createRegisteredCallback(userCallback, callbackId) {
+    const handle = koffi.register(
+      (result, message, _userData) => {
         try {
           const success = result === 1;
-          
-          // Try to parse message as JSON if possible
+
+          // Try to parse the message. The C++ side sends:
+          //   "Method call successful. Result: <value>"
+          //   or plain JSON, or a plain error string.
           let parsedMessage;
           try {
             parsedMessage = JSON.parse(message);
-          } catch (e) {
-            parsedMessage = message;
+          } catch (_e) {
+            // Extract result value from the C++ format
+            const match = message && message.match(/^Method call successful\. Result: (.+)$/);
+            if (match) {
+              const val = match[1];
+              // Try to parse the extracted value
+              if (val === 'true') parsedMessage = true;
+              else if (val === 'false') parsedMessage = false;
+              else if (!isNaN(Number(val))) parsedMessage = Number(val);
+              else parsedMessage = val;
+            } else {
+              parsedMessage = message;
+            }
           }
-          
-          // Call user callback
+
           userCallback(success, parsedMessage, {
             callbackId,
             timestamp: new Date().toISOString(),
@@ -508,8 +703,13 @@ class LogosAPI {
         } catch (error) {
           console.error(`Error in callback ${callbackId}:`, error);
         }
-      }
+      },
+      koffi.pointer(this._AsyncCallbackProto)
     );
+
+    // Prevent GC
+    this._registeredCallbacks.push(handle);
+    return handle;
   }
 
   // ===== Reflective API helpers =====
@@ -533,13 +733,12 @@ class LogosAPI {
       return JSON.stringify(Array.from(args).map(toParam));
     };
 
-    const api = this; // capture
+    const api = this;
 
     return new Proxy({}, {
       get(_t, property) {
         if (property === 'pluginName') return pluginName;
         if (property === 'toString') return () => `[LogosPluginProxy ${pluginName}]`;
-        // Avoid being mistaken for a thenable/Promise
         if (property === 'then') return undefined;
 
         if (typeof property !== 'string') {
@@ -553,10 +752,8 @@ class LogosAPI {
             if (typeof callback !== 'function') {
               throw new Error(`Callback must be a function for ${pluginName}.${property}`);
             }
-            return api.registerEventListener(pluginName, eventName, (success, message /* parsed or string */, meta) => {
-              // Forward parsed event payload if available
+            return api.registerEventListener(pluginName, eventName, (success, message, meta) => {
               if (success) {
-                // message is already parsed in _createFFICallback if JSON
                 callback(message);
               } else {
                 callback({ error: true, message });
@@ -569,7 +766,7 @@ class LogosAPI {
         return (...args) => new Promise((resolve, reject) => {
           try {
             const params = makeParamsJson(args);
-            api.callPluginMethodAsync(pluginName, property, params, (success, message /* parsed or string */, meta) => {
+            api.callPluginMethodAsync(pluginName, property, params, (success, message, meta) => {
               if (success) {
                 resolve(message);
               } else {
@@ -601,7 +798,6 @@ class LogosAPI {
     if (t === 'string') {
       return { type: 'string', value };
     }
-    // Fallback: stringify complex values
     try {
       return { type: 'string', value: JSON.stringify(value) };
     } catch (_e) {
@@ -610,4 +806,4 @@ class LogosAPI {
   }
 }
 
-module.exports = LogosAPI; 
+module.exports = LogosAPI;

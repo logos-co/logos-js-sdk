@@ -36,6 +36,49 @@
         }
       );
 
+      # nix run .#copy-libs — copies liblogos_core + logos_host into sdk lib/{platform}/ and bin/{platform}/
+      apps = forAllSystems ({ pkgs, logosLiblogos, logosCapabilityModule }:
+        let
+          # Map nix system to Node.js platform-arch convention
+          platformDir = {
+            "aarch64-darwin" = "darwin-arm64";
+            "x86_64-darwin"  = "darwin-x64";
+            "aarch64-linux"  = "linux-arm64";
+            "x86_64-linux"   = "linux-x64";
+          }.${pkgs.system};
+        in {
+        copy-libs = {
+          type = "app";
+          program = "${pkgs.writeShellScript "copy-libs" ''
+            set -e
+            SDK_DIR="$(pwd)"
+            PLATFORM="${platformDir}"
+
+            # Determine platform library extension
+            EXT="so"
+            case "$(uname -s)" in
+              Darwin) EXT="dylib";;
+            esac
+
+            echo "Copying liblogos binaries for $PLATFORM..."
+            echo "  Source: ${logosLiblogos}"
+
+            # Copy liblogos_core into lib/{platform}/
+            mkdir -p "$SDK_DIR/lib/$PLATFORM"
+            cp -L "${logosLiblogos}/lib/liblogos_core.$EXT" "$SDK_DIR/lib/$PLATFORM/"
+            echo "  lib/$PLATFORM/liblogos_core.$EXT"
+
+            # Copy logos_host into bin/{platform}/
+            mkdir -p "$SDK_DIR/bin/$PLATFORM"
+            cp -L "${logosLiblogos}/bin/logos_host" "$SDK_DIR/bin/$PLATFORM/"
+            chmod +x "$SDK_DIR/bin/$PLATFORM/logos_host"
+            echo "  bin/$PLATFORM/logos_host"
+
+            echo "Done. Run on each platform to build a multi-platform SDK."
+          ''}";
+        };
+      });
+
       devShells = forAllSystems ({ pkgs, logosLiblogos, logosCapabilityModule }: {
         default = pkgs.mkShell {
           nativeBuildInputs = [
