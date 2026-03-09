@@ -5,13 +5,18 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "copy-libs": "node scripts/copy-libs.js"
+    "copy-libs": "node scripts/copy-libs.js",
+    "prepublishOnly": "node scripts/copy-libs.js"
   },
   "files": [
     "index.js",
     "README.md",
     "lib/",
-    "scripts/"
+    "bin/",
+    "scripts/",
+    "flake.nix",
+    "flake.lock",
+    "nix/"
   ],
   "keywords": [
     "logos",
@@ -24,11 +29,6 @@
   "author": "Logos Team",
   "license": "MIT",
   "dependencies": {
-    "ffi-napi": "^4.0.3",
-    "ref-napi": "^3.0.3"
-  },
-  "peerDependencies": {
-    "ffi-napi": "^4.0.3",
-    "ref-napi": "^3.0.3"
+    "koffi": "^2.9.0"
   }
 } 

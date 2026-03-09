@@ -106,15 +106,38 @@ const options = {
 ## Requirements
 
 - Node.js 18+
-- liblogos_core built and available
-- ffi-napi and ref-napi dependencies
+- liblogos_core and logos_host binaries
 
-## Building liblogos_core
+## Setting Up Binaries
 
-Before using this SDK, ensure liblogos_core is built:
+The SDK ships with platform-specific binaries under `lib/{platform}/` and `bin/{platform}/`. Run `nix run .#copy-libs` on each target platform to populate them:
 
 ```bash
-./scripts/run_core.sh build
+cd logos-js-sdk
+nix build
+nix run .#copy-libs
 ```
 
-The library should be available at `logos-liblogos/build/lib/liblogos_core.{dylib|so|dll}` and plugins at `logos-liblogos/build/modules/`.
+This copies `liblogos_core` and `logos_host` into the current platform's subdirectory:
+
+```
+lib/
+  darwin-arm64/liblogos_core.dylib
+  linux-x64/liblogos_core.so
+  ...
+bin/
+  darwin-arm64/logos_host
+  linux-x64/logos_host
+  ...
+```
+
+Run on each platform (or in CI) to build a multi-platform SDK. These directories are checked into git so they're included in npm publish.
+
+At runtime, the SDK auto-selects the correct subdirectory for the current OS/arch.
+
+### Resolution order
+
+1. `sdk/lib/{platform}/` and `sdk/bin/{platform}/` — multi-platform layout
+2. `sdk/lib/` and `sdk/bin/` — single-platform fallback
+3. `LOGOS_LIBLOGOS_ROOT` env var — dev environment fallback
+4. `sdk/result/` — nix build symlink (local `file:` deps)
