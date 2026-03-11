@@ -2,12 +2,14 @@
   description = "Logos JavaScript SDK with compiled logos-liblogos";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Follow the same nixpkgs as logos-cpp-sdk to ensure Qt compatibility
+    nixpkgs.follows = "logos-cpp-sdk/nixpkgs";
+    logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk";
     logos-liblogos.url = "github:logos-co/logos-liblogos";
     logos-capability-module.url = "github:logos-co/logos-capability-module";
   };
 
-  outputs = { self, nixpkgs, logos-liblogos, logos-capability-module }:
+  outputs = { self, nixpkgs, logos-cpp-sdk, logos-liblogos, logos-capability-module }:
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
