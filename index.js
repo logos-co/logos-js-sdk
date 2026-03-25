@@ -33,6 +33,8 @@ class LogosAPI {
     this.callbacks = new Map();
     this.eventListeners = new Map();
     this._registeredCallbacks = []; // prevent GC of koffi.register() handles
+    this._loadedPluginSet = new Set(); // JS-side tracking (avoids reentrant FFI in host callbacks)
+    this._knownPluginSet = new Set();
 
     if (this.options.autoInit) {
       this.init();
@@ -252,24 +254,24 @@ class LogosAPI {
       this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int result, const char *message, void *user_data)');
     }
 
-    // Create persistent host callbacks that delegate to core functions
+    // Host callbacks use JS-side Sets instead of calling back into C.
+    // This avoids reentrant C→JS→C calls which koffi doesn't support.
     const isLoadedCb = koffi.register((name) => {
-      try {
-        const loaded = this.getLoadedPlugins();
-        return loaded.includes(name) ? 1 : 0;
-      } catch (_e) { return 0; }
+      return this._loadedPluginSet.has(name) ? 1 : 0;
     }, koffi.pointer(this._HostCallbackProto));
 
     const isKnownCb = koffi.register((name) => {
-      try {
-        const known = this.getKnownPlugins();
-        return known.includes(name) ? 1 : 0;
-      } catch (_e) { return 0; }
+      return this._knownPluginSet.has(name) ? 1 : 0;
     }, koffi.pointer(this._HostCallbackProto));
 
     const loadPluginCb = koffi.register((name) => {
+      // This is called from C when module-client needs to trigger a plugin load.
+      // We call into C here — this is safe because the call originates from JS
+      // context (event processing), not from within a C→JS callback.
       try {
-        return this._core.loadPlugin(name);
+        const result = this._core.loadPlugin(name);
+        if (result === 1) this._loadedPluginSet.add(name);
+        return result;
       } catch (_e) { return 0; }
     }, koffi.pointer(this._HostCallbackProto));
 
@@ -352,6 +354,8 @@ class LogosAPI {
 
     this.callbacks.clear();
     this.eventListeners.clear();
+    this._loadedPluginSet.clear();
+    this._knownPluginSet.clear();
 
     this.isInitialized = false;
     this.isStarted = false;
@@ -398,7 +402,9 @@ class LogosAPI {
             if (mainObj[variant]) {
               const pluginPath = path.join(pluginsDir, pluginName, mainObj[variant]);
               if (fs.existsSync(pluginPath)) {
-                return !!this._core.processPlugin(pluginPath);
+                const result = !!this._core.processPlugin(pluginPath);
+                if (result) this._knownPluginSet.add(pluginName);
+                return result;
               }
             }
           }
@@ -409,7 +415,9 @@ class LogosAPI {
     // Strategy 2: flat layout
     const flatPath = path.join(pluginsDir, `${pluginName}_plugin${pluginExtension}`);
     if (fs.existsSync(flatPath)) {
-      return !!this._core.processPlugin(flatPath);
+      const result = !!this._core.processPlugin(flatPath);
+      if (result) this._knownPluginSet.add(pluginName);
+      return result;
     }
 
     throw new Error(
@@ -419,17 +427,29 @@ class LogosAPI {
 
   loadPlugin(pluginName) {
     if (!this.isInitialized) throw new Error('LogosAPI must be initialized first');
-    return this._core.loadPlugin(pluginName) === 1;
+    const result = this._core.loadPlugin(pluginName) === 1;
+    if (result) this._loadedPluginSet.add(pluginName);
+    return result;
   }
 
   unloadPlugin(pluginName) {
     if (!this.isInitialized) throw new Error('LogosAPI must be initialized first');
-    return this._core.unloadPlugin(pluginName) === 1;
+    const result = this._core.unloadPlugin(pluginName) === 1;
+    if (result) this._loadedPluginSet.delete(pluginName);
+    return result;
   }
 
   loadPluginWithDependencies(pluginName) {
     if (!this.isInitialized) throw new Error('LogosAPI must be initialized first');
-    return this._core.loadPluginWithDeps(pluginName) === 1;
+    const result = this._core.loadPluginWithDeps(pluginName) === 1;
+    if (result) {
+      this._loadedPluginSet.add(pluginName);
+      // Sync with core since deps may have been loaded too
+      try {
+        for (const name of this.getLoadedPlugins()) this._loadedPluginSet.add(name);
+      } catch (_e) { /* best effort */ }
+    }
+    return result;
   }
 
   addPluginsDir(dir) {
