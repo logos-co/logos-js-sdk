@@ -24,6 +24,7 @@
  */
 
 const path = require('path');
+const assert = require('assert');
 const LogosAPI = require('../index');
 
 // Parse command-line arguments
@@ -102,20 +103,25 @@ async function main() {
 
     const addResult = await logos.calc_module.add(5, 3);
     console.log(`calc_module.add(5, 3) = ${addResult}`);
+    assert.strictEqual(Number(addResult), 8, 'add(5,3) should be 8');
 
     const mulResult = await logos.calc_module.multiply(7, 6);
     console.log(`calc_module.multiply(7, 6) = ${mulResult}`);
+    assert.strictEqual(Number(mulResult), 42, 'multiply(7,6) should be 42');
 
     const factResult = await logos.calc_module.factorial(10);
     console.log(`calc_module.factorial(10) = ${factResult}`);
+    assert.strictEqual(Number(factResult), 3628800, 'factorial(10) should be 3628800');
 
     const fibResult = await logos.calc_module.fibonacci(12);
     console.log(`calc_module.fibonacci(12) = ${fibResult}`);
+    assert.strictEqual(Number(fibResult), 144, 'fibonacci(12) should be 144');
 
     const versionResult = await logos.calc_module.libVersion();
     console.log(`calc_module.libVersion() = ${versionResult}`);
+    assert.ok(typeof versionResult === 'string' && versionResult.length > 0, 'libVersion() should return non-empty string');
 
-    console.log('\n=== All calls completed successfully! ===');
+    console.log('\n=== All assertions passed! ===');
 
   } catch (error) {
     console.error('Error:', error);
@@ -125,6 +131,8 @@ async function main() {
     console.log('\nCleaning up...');
     logos.cleanup();
     console.log('Done.');
+    // Force exit — Qt event loop threads keep the process alive after cleanup
+    process.exit(process.exitCode || 0);
   }
 }
 

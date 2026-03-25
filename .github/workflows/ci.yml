@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build calc_module test fixture
+        run: nix build .#calc-module-fixture --print-build-logs
+
+      - name: Run integration test
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+
+            # Platform-specific library extension
+            EXT=so
+            [ "$(uname)" = "Darwin" ] && EXT=dylib
+
+            # Set up modules directory with the calc_module plugin
+            CALC_MODULE=$(nix build .#calc-module-fixture --no-link --print-out-paths)
+            mkdir -p modules
+            cp -L "$CALC_MODULE/lib/calc_module_plugin.$EXT" modules/
+
+            # Install JS dependencies
+            npm install
+
+            # Configure environment
+            export LOGOS_LIB_PATH="$LOGOS_LIBLOGOS_ROOT/lib/liblogos_core.$EXT"
+            export LOGOS_MODULE_CLIENT_LIB_PATH="$LOGOS_MODULE_CLIENT_ROOT/lib/liblogos_module_client.$EXT"
+            export LOGOS_HOST_PATH="$LOGOS_LIBLOGOS_ROOT/bin/logos_host"
+            export LOGOS_MODULES_DIR="$PWD/modules"
+            export QT_QPA_PLATFORM=offscreen
+
+            echo "=== Environment ==="
+            echo "LOGOS_LIB_PATH=$LOGOS_LIB_PATH"
+            echo "LOGOS_MODULE_CLIENT_LIB_PATH=$LOGOS_MODULE_CLIENT_LIB_PATH"
+            echo "LOGOS_HOST_PATH=$LOGOS_HOST_PATH"
+            echo "LOGOS_MODULES_DIR=$LOGOS_MODULES_DIR"
+
+            # Run the example (has assertions)
+            node example/calc-example.js
+          '

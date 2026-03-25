@@ -8,21 +8,27 @@
     logos-liblogos.url = "github:logos-co/logos-liblogos";
     logos-module-client.url = "github:logos-co/logos-module-client";
     logos-capability-module.url = "github:logos-co/logos-capability-module";
+
+    # Test-only: needed to build the calc_module test fixture
+    logos-module.url = "github:logos-co/logos-module";
+    logos-module-builder.url = "github:logos-co/logos-module-builder";
   };
 
-  outputs = { self, nixpkgs, logos-nix, logos-cpp-sdk, logos-liblogos, logos-module-client, logos-capability-module }:
+  outputs = { self, nixpkgs, logos-nix, logos-cpp-sdk, logos-liblogos, logos-module-client, logos-capability-module, logos-module, logos-module-builder }:
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
         inherit system;
         pkgs = import nixpkgs { inherit system; };
+        logosSdk = logos-cpp-sdk.packages.${system}.default;
         logosLiblogos = logos-liblogos.packages.${system}.default;
         logosModuleClient = logos-module-client.packages.${system}.default;
+        logosModule = logos-module.packages.${system}.default;
         logosCapabilityModule = logos-capability-module.packages.${system}.default;
       });
     in
     {
-      packages = forAllSystems ({ pkgs, logosLiblogos, logosModuleClient, logosCapabilityModule, ... }:
+      packages = forAllSystems ({ pkgs, logosLiblogos, logosModuleClient, logosCapabilityModule, logosSdk, logosModule, ... }:
         let
           common = import ./nix/default.nix {
             inherit pkgs logosLiblogos logosModuleClient logosCapabilityModule;
@@ -34,6 +40,12 @@
         in
         {
           default = package;
+
+          # Test fixture: calc_module plugin for integration tests
+          calc-module-fixture = import ./nix/test-calc-module.nix {
+            inherit pkgs logosSdk logosModule;
+            logosModuleBuilderSrc = logos-module-builder;
+          };
         }
       );
 
