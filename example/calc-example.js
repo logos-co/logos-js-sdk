@@ -97,7 +97,12 @@ async function main() {
     console.log('  Known:', status.known);
     console.log('');
 
-    // Step 6: Call methods using the reflective proxy API
+    // Step 6: Wait for the Qt Remote Objects connection to establish
+    // The module runs in a logos_host process; the SDK needs time to connect.
+    console.log('Waiting for module connection...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Step 7: Call methods using the reflective proxy API
     // logos.calc_module.methodName(args) returns a Promise
     console.log('--- Calling calc_module methods ---\n');
 
