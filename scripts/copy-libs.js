@@ -5,46 +5,14 @@ const path = require('path');
 
 function copyFileSync(src, dest) {
   try {
-    // Ensure destination directory exists
     const destDir = path.dirname(dest);
     if (!fs.existsSync(destDir)) {
       fs.mkdirSync(destDir, { recursive: true });
     }
-    
-    // Copy file
     fs.copyFileSync(src, dest);
     return true;
   } catch (error) {
     console.warn(`Failed to copy ${src} to ${dest}:`, error.message);
-    return false;
-  }
-}
-
-function copyDirectorySync(src, dest) {
-  try {
-    // Ensure destination directory exists
-    if (!fs.existsSync(dest)) {
-      fs.mkdirSync(dest, { recursive: true });
-    }
-    
-    // Read source directory
-    const items = fs.readdirSync(src);
-    
-    for (const item of items) {
-      const srcPath = path.join(src, item);
-      const destPath = path.join(dest, item);
-      
-      const stat = fs.statSync(srcPath);
-      if (stat.isDirectory()) {
-        copyDirectorySync(srcPath, destPath);
-      } else {
-        copyFileSync(srcPath, destPath);
-      }
-    }
-    
-    return true;
-  } catch (error) {
-    console.warn(`Failed to copy directory ${src} to ${dest}:`, error.message);
     return false;
   }
 }
@@ -60,44 +28,86 @@ function getLibraryExtension() {
   }
 }
 
+function getPlatformDir() {
+  return `${process.platform}-${process.arch}`;
+}
+
+function findSourceDir(envVar, sdkDir) {
+  const candidates = [
+    path.resolve(sdkDir, 'result'),
+    process.env[envVar],
+  ].filter(Boolean);
+
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'lib')) || fs.existsSync(path.join(dir, 'bin'))) {
+      return dir;
+    }
+  }
+  return null;
+}
+
 function main() {
-  console.log('📦 Copying liblogos library to SDK...');
-  
   const sdkDir = path.resolve(__dirname, '..');
-  // Use the Nix build output in logos-js-sdk/result
-  const coreDir = path.resolve(sdkDir, 'result');
-  
-  // Define paths
+  const coreDir = findSourceDir('LOGOS_LIBLOGOS_ROOT', sdkDir);
+  const clientDir = findSourceDir('LOGOS_MODULE_CLIENT_ROOT', sdkDir);
+  const platformDir = getPlatformDir();
+
+  if (!coreDir) {
+    console.error('No build output found for liblogos_core. Searched:');
+    console.error('  - result/           (run: nix build)');
+    console.error('  - LOGOS_LIBLOGOS_ROOT env var');
+    process.exit(1);
+  }
+
+  console.log(`Copying binaries for ${platformDir}...`);
+
   const libExtension = getLibraryExtension();
+  let copied = 0;
+
+  // Copy liblogos_core into lib/{platform}/
   const libSrc = path.join(coreDir, 'lib', `liblogos_core${libExtension}`);
-  const libDest = path.join(sdkDir, 'lib', `liblogos_core${libExtension}`);
-  
-  let copySuccess = true;
-  
-  // Copy library
-  console.log(`📚 Copying library from ${libSrc}...`);
+  const libDest = path.join(sdkDir, 'lib', platformDir, `liblogos_core${libExtension}`);
   if (fs.existsSync(libSrc)) {
     if (copyFileSync(libSrc, libDest)) {
-      console.log(`✅ Library copied to ${libDest}`);
-    } else {
-      copySuccess = false;
+      console.log(`  lib/${platformDir}/liblogos_core${libExtension}`);
+      copied++;
     }
   } else {
-    console.warn(`⚠️  Library not found at ${libSrc}`);
-    console.warn('   Please build the JS SDK with Nix first (in logos-js-sdk): nix build');
-    copySuccess = false;
+    console.warn(`  Library not found at ${libSrc}`);
   }
-  
-  if (copySuccess) {
-    console.log('✨ SDK now has its own copy of liblogos_core!');
-    console.log('📝 Note: Applications should have their own plugins directory.');
+
+  // Copy liblogos_module_client into lib/{platform}/
+  const clientSrcDir = clientDir || coreDir;
+  const clientSrc = path.join(clientSrcDir, 'lib', `liblogos_module_client${libExtension}`);
+  const clientDest = path.join(sdkDir, 'lib', platformDir, `liblogos_module_client${libExtension}`);
+  if (fs.existsSync(clientSrc)) {
+    if (copyFileSync(clientSrc, clientDest)) {
+      console.log(`  lib/${platformDir}/liblogos_module_client${libExtension}`);
+      copied++;
+    }
   } else {
-    console.log('⚠️  Library could not be copied. The SDK will fall back to the original location.');
+    console.warn(`  liblogos_module_client not found at ${clientSrc} (optional)`);
   }
+
+  // Copy logos_host into bin/{platform}/
+  const hostName = process.platform === 'win32' ? 'logos_host.exe' : 'logos_host';
+  const hostSrc = path.join(coreDir, 'bin', hostName);
+  const hostDest = path.join(sdkDir, 'bin', platformDir, hostName);
+  if (fs.existsSync(hostSrc)) {
+    if (copyFileSync(hostSrc, hostDest)) {
+      try { fs.chmodSync(hostDest, 0o755); } catch (_) {}
+      console.log(`  bin/${platformDir}/${hostName}`);
+      copied++;
+    }
+  } else {
+    console.warn(`  logos_host not found at ${hostSrc}`);
+  }
+
+  console.log(`Copied ${copied} files. Run on each platform for multi-platform SDK.`);
 }
 
 if (require.main === module) {
   main();
 }
 
-module.exports = { copyFileSync, copyDirectorySync, getLibraryExtension }; 
+module.exports = { copyFileSync, getLibraryExtension, getPlatformDir };

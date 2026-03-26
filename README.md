@@ -2,85 +2,84 @@ NOTE: This is very WIP
 
 # Logos API - JavaScript SDK
 
-A JavaScript SDK for interacting with liblogos_core, providing a clean abstraction over FFI functionality for plugin management, async operations, and event handling.
+A JavaScript SDK for interacting with liblogos_core and liblogos_module_client, providing a clean abstraction over FFI functionality for plugin management, async operations, and event handling.
+
+Uses [koffi](https://koffi.dev/) for FFI (supports Node.js 16+, including v24).
+
+## Architecture
+
+The SDK loads two native libraries:
+- **liblogos_core** — core lifecycle, plugin management, event processing
+- **liblogos_module_client** — async method calls, event listeners (proxy API)
+
+The module client is initialized with host callbacks that bridge back to the core, so it can query plugin state (is loaded, is known, load plugin).
 
 ## Basic Usage
-
-### LogosAPI - Core Functionality
 
 ```javascript
 const LogosAPI = require('logos-api');
 
-// Initialize with default settings
-const logos = new LogosAPI();
-
-// Or with custom options
+// Initialize with custom options
 const logos = new LogosAPI({
-  libPath: '/custom/path/to/liblogos_core.dylib',
-  pluginsDir: '/custom/plugins/directory',
-  autoInit: true
+  libPath: '/path/to/liblogos_core.so',
+  moduleClientLibPath: '/path/to/liblogos_module_client.so',  // optional
+  pluginsDir: '/path/to/modules',
+  autoInit: false
 });
 
-// Start the system
+logos.init();
 logos.start();
+logos.startEventProcessing(50);
 
-// Load plugins
-const results = logos.processAndLoadPlugins(['waku_module', 'chat', 'template_module']);
-console.log('Plugin loading results:', results);
+// Load a plugin
+logos.processAndLoadPlugin('calc_module');
 
-// Check plugin status
-const status = logos.getPluginStatus();
-console.log('Loaded plugins:', status.loaded);
-console.log('Known plugins:', status.known);
+// Call methods via reflective proxy (returns Promise)
+const result = await logos.calc_module.add(5, 3);
+console.log('5 + 3 =', result);
 
-// Call a plugin method asynchronously
-logos.callPluginMethodAsync('chat', 'initialize', JSON.stringify([]), (success, message, meta) => {
-  if (success) {
-    console.log('Chat initialized:', message);
-  } else {
-    console.error('Failed to initialize chat:', message);
-  }
+// Or use the low-level API
+logos.callPluginMethodAsync('calc_module', 'add', JSON.stringify([
+  { name: 'a', value: '5', type: 'int' },
+  { name: 'b', value: '3', type: 'int' }
+]), (success, message, meta) => {
+  console.log('Result:', message);
 });
 
 // Register event listener
-logos.registerEventListener('chat', 'chatMessage', (success, message, meta) => {
-  if (success && message.event === 'chatMessage') {
-    const [timestamp, username, text] = message.data;
-    console.log(`Message from ${username}: ${text}`);
-  }
+logos.registerEventListener('chat', 'chatMessage', (success, message) => {
+  console.log('Event:', message);
 });
 
-// Start event processing
-logos.startEventProcessing();
+// Or via proxy
+logos.chat.onChatMessage((message) => console.log('Chat:', message));
 
-// Cleanup when done
-process.on('SIGINT', () => {
-  logos.cleanup();
-  process.exit(0);
-});
+// Cleanup
+logos.cleanup();
 ```
 
 ## API Reference
 
-### LogosAPI
-
-#### Constructor Options
+### Constructor Options
 
 ```javascript
-const options = {
-  libPath: string,           // Custom path to liblogos_core library
-  pluginsDir: string,        // Custom plugins directory
-  autoInit: boolean          // Auto-initialize on construction (default: true)
-};
+{
+  libPath: string,              // Path to liblogos_core library
+  moduleClientLibPath: string,  // Path to liblogos_module_client (optional)
+  pluginsDir: string,           // Plugins directory
+  logosHostPath: string,        // Path to logos_host binary
+  autoInit: boolean             // Auto-initialize on construction (default: true)
+}
 ```
 
-#### Core Methods
+### Core Methods
 
 - `init()` - Initialize the library
 - `start()` - Start the LogosCore system
 - `cleanup()` - Clean up and shutdown
+- `exec()` - Execute blocking event loop
 
-#### Plugin Management
+### Plugin Management
 
 - `getLoadedPlugins()` - Get array of loaded plugin names
 - `getKnownPlugins()` - Get array of known plugin names
@@ -88,33 +87,61 @@ const options = {
 - `processPlugin(pluginName)` - Process a plugin file
 - `loadPlugin(pluginName)` - Load a plugin
 - `unloadPlugin(pluginName)` - Unload a plugin
+- `loadPluginWithDependencies(pluginName)` - Load with dependency resolution
+- `addPluginsDir(dir)` - Add additional plugins directory
 - `processAndLoadPlugin(pluginName)` - Process and load in one step
 - `processAndLoadPlugins(pluginNames[])` - Process and load multiple plugins
+- `getToken(key)` - Get a token by key
+- `getModuleStats()` - Get module CPU/memory stats
 
-#### Async Operations
+### Async Operations (via logos-module-client)
 
 - `callPluginMethodAsync(pluginName, methodName, params, callback)` - Call plugin method
 - `registerEventListener(pluginName, eventName, callback)` - Register event listener
 
-#### Event Processing
+### Event Processing
 
-- `startEventProcessing(interval)` - Start event processing loop
+- `startEventProcessing(interval)` - Start event processing loop (default: 100ms)
 - `stopEventProcessing()` - Stop event processing loop
-- `exec()` - Execute blocking event loop
 
+### Reflective Proxy
+
+Access any loaded plugin as a property: `logos.pluginName.method(args)` returns a Promise.
+
+Event subscription: `logos.pluginName.onEventName(callback)`.
 
 ## Requirements
 
 - Node.js 18+
-- liblogos_core built and available
-- ffi-napi and ref-napi dependencies
+- liblogos_core and logos_host binaries
+- liblogos_module_client (optional, needed for async method calls)
 
-## Building liblogos_core
+## Setting Up Binaries
 
-Before using this SDK, ensure liblogos_core is built:
+Run `nix run .#copy-libs` on each target platform:
 
 ```bash
-./scripts/run_core.sh build
+cd logos-js-sdk
+nix build
+nix run .#copy-libs
 ```
 
-The library should be available at `logos-liblogos/build/lib/liblogos_core.{dylib|so|dll}` and plugins at `logos-liblogos/build/modules/`.
+This copies `liblogos_core`, `liblogos_module_client`, and `logos_host` into platform subdirectories:
+
+```
+lib/
+  darwin-arm64/liblogos_core.dylib
+  darwin-arm64/liblogos_module_client.dylib
+  linux-x64/liblogos_core.so
+  linux-x64/liblogos_module_client.so
+bin/
+  darwin-arm64/logos_host
+  linux-x64/logos_host
+```
+
+### Library Resolution Order
+
+1. `sdk/lib/{platform}/` — multi-platform layout
+2. `sdk/lib/` — single-platform fallback
+3. `LOGOS_LIBLOGOS_ROOT` / `LOGOS_MODULE_CLIENT_ROOT` env vars
+4. `sdk/result/` — nix build symlink
