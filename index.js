@@ -122,10 +122,10 @@ class LogosAPI {
 
       // Qt event processing
       processEvents:      lib.func('void logos_core_process_events()'),
-
-      // Async method call (uses core's LogosAPI which has the correct auth tokens)
-      callMethodAsync:    lib.func('void logos_core_call_plugin_method_async(const char *plugin, const char *method, const char *params, AsyncCallback *cb, void *user_data)'),
     };
+
+    // Async method calls are handled by logos-module-client (no longer in liblogos_core)
+    this._core.callMethodAsync = null;
   }
 
   /**
@@ -144,6 +144,11 @@ class LogosAPI {
 
     this._clientLib = koffi.load(libPath);
     const lib = this._clientLib;
+
+    // Ensure async callback type is defined (may already exist from core library)
+    if (!this._AsyncCallbackProto) {
+      this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int result, const char *message, void *user_data)');
+    }
 
     // Define the host callback types for init
     this._HostCallbackProto = koffi.proto('int HostCallback(const char *name)');
@@ -500,18 +505,19 @@ class LogosAPI {
   // ===== Async / proxy API (module client) =====
 
   /**
-   * Call a plugin method asynchronously.
-   * Routes through liblogos_core's C API which shares the same LogosAPI/TokenManager
-   * as PluginManager, ensuring auth tokens from loadPlugin() are available.
+   * Call a plugin method asynchronously via logos-module-client.
    */
   callPluginMethodAsync(pluginName, methodName, params, callback) {
     if (!this.isInitialized) throw new Error('LogosAPI must be initialized first');
-    if (!this._core.callMethodAsync) throw new Error('Core library does not support async method calls');
+    if (!this._clientLib) {
+      throw new Error('logos-module-client not loaded; cannot call plugin methods');
+    }
 
     const callbackId = this._generateCallbackId();
     const registered = this._createRegisteredCallback(callback, callbackId);
     this.callbacks.set(callbackId, { callback, registered });
-    this._core.callMethodAsync(pluginName, methodName, params, registered, null);
+
+    this._client.callMethodAsync(pluginName, methodName, params, registered, null);
     return callbackId;
   }
 
