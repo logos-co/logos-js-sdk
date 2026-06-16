@@ -1,5 +1,5 @@
 # Common build configuration shared across all packages
-{ pkgs, logosLiblogos, logosModuleClient, logosCapabilityModule }:
+{ pkgs, logosLiblogos, logosProtocol, logosCapabilityModule }:
 
 {
   pname = "logos-js-sdk";

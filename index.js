@@ -3,12 +3,12 @@ const path = require('path');
 const fs = require('fs');
 
 /**
- * LogosAPI - A JavaScript SDK for interacting with liblogos_core and liblogos_module_client
+ * LogosAPI - A JavaScript SDK for interacting with liblogos_core and liblogos_protocol
  *
  * This class abstracts the FFI functionality needed to use liblogos including:
  * - Library loading and initialization (liblogos_core)
  * - Plugin management (processing, loading, unloading)
- * - Async method calls and event handling (liblogos_module_client)
+ * - Async method calls and event handling (liblogos_protocol's lp_* C ABI)
  * - Event processing and lifecycle management
  *
  * Uses koffi for FFI (supports Node.js 16+, including v24).
@@ -17,23 +17,26 @@ class LogosAPI {
   constructor(options = {}) {
     this.options = {
       libPath: options.libPath || null,
-      moduleClientLibPath: options.moduleClientLibPath || null,
+      // `moduleClientLibPath` kept as a back-compat alias for the path that
+      // now points at liblogos_protocol (was liblogos_module_client).
+      protocolLibPath: options.protocolLibPath || options.moduleClientLibPath || null,
       pluginsDir: options.pluginsDir || null,
       autoInit: options.autoInit !== false, // Default to true
       ...options
     };
 
     this._coreLib = null;       // koffi handle for liblogos_core
-    this._clientLib = null;     // koffi handle for liblogos_module_client
+    this._protocolLib = null;   // koffi handle for liblogos_protocol
     this._core = {};            // bound C functions from liblogos_core
-    this._client = {};          // bound C functions from liblogos_module_client
+    this._lp = {};              // bound lp_* C functions from liblogos_protocol
+    this._lpClients = new Map(); // target plugin name -> lp_client* (cached, one per target)
     this.isInitialized = false;
     this.isStarted = false;
     this.eventProcessingInterval = null;
     this.callbacks = new Map();
     this.eventListeners = new Map();
     this._registeredCallbacks = []; // prevent GC of koffi.register() handles
-    this._loadedPluginSet = new Set(); // JS-side tracking (avoids reentrant FFI in host callbacks)
+    this._loadedPluginSet = new Set(); // JS-side tracking of loaded/known plugins
     this._knownPluginSet = new Set();
 
     if (this.options.autoInit) {
@@ -70,9 +73,8 @@ class LogosAPI {
 
     try {
       this._loadCoreLibrary();
-      this._loadModuleClientLibrary();
+      this._loadProtocolLibrary();
       this._initializeCore();
-      this._initializeModuleClient();
       this.isInitialized = true;
       return true;
     } catch (error) {
@@ -92,9 +94,10 @@ class LogosAPI {
     this._coreLib = koffi.load(libPath);
     const lib = this._coreLib;
 
-    // Define callback types used by both core and module-client libraries
+    // Define the async callback type shared with the lp_* result callback:
+    //   void(int ok, const char *json, void *user_data)
     if (!this._AsyncCallbackProto) {
-      this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int result, const char *message, void *user_data)');
+      this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int ok, const char *json, void *user_data)');
     }
 
     this._core = {
@@ -124,49 +127,52 @@ class LogosAPI {
       processEvents:      lib.func('void logos_core_process_events()'),
     };
 
-    // Async method calls are handled by logos-module-client (no longer in liblogos_core)
+    // Async method calls go through liblogos_protocol's lp_* ABI, not liblogos_core.
     this._core.callMethodAsync = null;
   }
 
   /**
-   * Load the liblogos_module_client library via koffi
+   * Load the liblogos_protocol library via koffi and bind the lp_* C ABI.
+   *
+   * lp_* is the language-neutral protocol C ABI (logos_protocol.h). An
+   * out-of-plugin host like this SDK creates a client per target module
+   * (origin "core") and the call routes over the process-default transport
+   * that liblogos_core configured at startup — no proxy/host-callback layer
+   * is required.
    * @private
    */
-  _loadModuleClientLibrary() {
+  _loadProtocolLibrary() {
     let libPath;
     try {
-      libPath = this._findLibrary('liblogos_module_client', this.options.moduleClientLibPath, 'LOGOS_MODULE_CLIENT_ROOT');
+      libPath = this._findLibrary('liblogos_protocol', this.options.protocolLibPath, 'LOGOS_PROTOCOL_ROOT');
     } catch (_e) {
-      // Module client is optional — proxy API calls will fail if not loaded
-      console.warn('logos-module-client not found; proxy/async API will not be available.');
+      // logos-protocol is optional — without it the proxy/async API (method
+      // calls + event listeners) is unavailable, but core plugin management
+      // via liblogos_core still works.
+      console.warn('logos-protocol not found; proxy/async API will not be available.');
       return;
     }
 
-    this._clientLib = koffi.load(libPath);
-    const lib = this._clientLib;
+    this._protocolLib = koffi.load(libPath);
+    const lib = this._protocolLib;
 
-    // Ensure async callback type is defined (may already exist from core library)
+    // Result callback for lp_invoke_async (same shape as AsyncCallback above).
     if (!this._AsyncCallbackProto) {
-      this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int result, const char *message, void *user_data)');
+      this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int ok, const char *json, void *user_data)');
+    }
+    // Event callback for lp_subscribe.
+    if (!this._LpEventCbProto) {
+      this._LpEventCbProto = koffi.proto('void LpEventCb(const char *event_name, const char *data_json, void *user_data)');
     }
 
-    // Define the host callback types for init
-    this._HostCallbackProto = koffi.proto('int HostCallback(const char *name)');
-
-    this._client = {
-      // Initialization with individual function pointers (FFI-friendly)
-      initWithCallbacks: lib.func('void logos_module_client_init_with_callbacks(HostCallback *is_loaded, HostCallback *is_known, HostCallback *load_plugin)'),
-
-      // Async operations
-      callMethodAsync:      lib.func('void logos_module_client_call_method_async(const char *plugin, const char *method, const char *params, AsyncCallback *cb, void *user_data)'),
-      asyncOperation:       lib.func('void logos_module_client_async_operation(const char *data, AsyncCallback *cb, void *user_data)'),
-      loadPluginAsync:      lib.func('void logos_module_client_load_plugin_async(const char *name, AsyncCallback *cb, void *user_data)'),
-
-      // Event listener
-      registerEventListener: lib.func('void logos_module_client_register_event_listener(const char *plugin, const char *event, AsyncCallback *cb, void *user_data)'),
-
-      // Cleanup
-      shutdown:             lib.func('void logos_module_client_shutdown()'),
+    // lp_client* / lp_subscription* are opaque handles, bound as `void *`.
+    this._lp = {
+      clientCreate:  lib.func('void *lp_client_create(const char *target_module, const char *origin_module, const char *target_transport_json, const char *capability_transport_json)'),
+      clientDestroy: lib.func('void lp_client_destroy(void *client)'),
+      invokeAsync:   lib.func('int lp_invoke_async(void *client, const char *method, const char *args_json, int timeout_ms, AsyncCallback *cb, void *user_data)'),
+      subscribe:     lib.func('void *lp_subscribe(void *client, const char *event_name, LpEventCb *cb, void *user_data)'),
+      unsubscribe:   lib.func('void lp_unsubscribe(void *sub)'),
+      stringFree:    lib.func('void lp_string_free(char *s)'),
     };
   }
 
@@ -252,44 +258,6 @@ class LogosAPI {
   }
 
   /**
-   * Initialize the module client with host callbacks that bridge to liblogos_core.
-   * This allows module_client to query plugin state from the core.
-   * @private
-   */
-  _initializeModuleClient() {
-    if (!this._clientLib) return;
-
-    // Define the async callback proto if not already done
-    if (!this._AsyncCallbackProto) {
-      this._AsyncCallbackProto = koffi.proto('void AsyncCallback(int result, const char *message, void *user_data)');
-    }
-
-    // Host callbacks use JS-side Sets instead of calling back into C.
-    // This avoids reentrant C→JS→C calls which koffi doesn't support.
-    const isLoadedCb = koffi.register((name) => {
-      return this._loadedPluginSet.has(name) ? 1 : 0;
-    }, koffi.pointer(this._HostCallbackProto));
-
-    const isKnownCb = koffi.register((name) => {
-      return this._knownPluginSet.has(name) ? 1 : 0;
-    }, koffi.pointer(this._HostCallbackProto));
-
-    const loadPluginCb = koffi.register((name) => {
-      // This is called from C when module-client needs to trigger a plugin load.
-      // We call into C here — this is safe because the call originates from JS
-      // context (event processing), not from within a C→JS callback.
-      try {
-        const result = this._core.loadPlugin(name);
-        if (result === 1) this._loadedPluginSet.add(name);
-        return result;
-      } catch (_e) { return 0; }
-    }, koffi.pointer(this._HostCallbackProto));
-
-    this._registeredCallbacks.push(isLoadedCb, isKnownCb, loadPluginCb);
-    this._client.initWithCallbacks(isLoadedCb, isKnownCb, loadPluginCb);
-  }
-
-  /**
    * Try to locate logos_host and set LOGOS_HOST_PATH env var.
    * @private
    */
@@ -349,9 +317,19 @@ class LogosAPI {
   cleanup() {
     this.stopEventProcessing();
 
-    if (this._client.shutdown) {
-      this._client.shutdown();
+    // Tear down protocol subscriptions and clients before unwinding the core.
+    if (this._lp.unsubscribe) {
+      for (const { sub } of this.eventListeners.values()) {
+        if (sub) { try { this._lp.unsubscribe(sub); } catch (_e) { /* ignore */ } }
+      }
     }
+    if (this._lp.clientDestroy) {
+      for (const client of this._lpClients.values()) {
+        try { this._lp.clientDestroy(client); } catch (_e) { /* ignore */ }
+      }
+    }
+    this._lpClients.clear();
+
     if (this._core.cleanup) {
       this._core.cleanup();
     }
@@ -502,36 +480,60 @@ class LogosAPI {
     try { return JSON.parse(json); } catch (_e) { return json; }
   }
 
-  // ===== Async / proxy API (module client) =====
+  // ===== Async / proxy API (lp_* over liblogos_protocol) =====
 
   /**
-   * Call a plugin method asynchronously via logos-module-client.
+   * Get (or lazily create + cache) an lp_client for a target plugin.
+   *
+   * Origin is "core": this process is the host, and the target is reached over
+   * the process-default transport that liblogos_core configured at startup.
+   * @private
+   */
+  _clientFor(pluginName) {
+    let client = this._lpClients.get(pluginName);
+    if (client) return client;
+    client = this._lp.clientCreate(pluginName, 'core', null, null);
+    if (client) this._lpClients.set(pluginName, client);
+    return client;
+  }
+
+  /**
+   * Call a plugin method asynchronously via lp_invoke_async.
    */
   callPluginMethodAsync(pluginName, methodName, params, callback) {
     if (!this.isInitialized) throw new Error('LogosAPI must be initialized first');
-    if (!this._clientLib) {
-      throw new Error('logos-module-client not loaded; cannot call plugin methods');
+    if (!this._protocolLib) {
+      throw new Error('logos-protocol not loaded; cannot call plugin methods');
     }
+
+    const client = this._clientFor(pluginName);
+    if (!client) throw new Error(`Failed to create protocol client for plugin: ${pluginName}`);
 
     const callbackId = this._generateCallbackId();
     const registered = this._createRegisteredCallback(callback, callbackId);
     this.callbacks.set(callbackId, { callback, registered });
 
-    this._client.callMethodAsync(pluginName, methodName, params, registered, null);
+    const rc = this._lp.invokeAsync(client, methodName, params || '[]', 0, registered, null);
+    if (rc !== 0) {
+      callback(false, `Failed to dispatch method call to ${pluginName}.${methodName}`, { callbackId });
+    }
     return callbackId;
   }
 
   /**
-   * Register an event listener (via logos-module-client)
+   * Register an event listener via lp_subscribe.
    */
   registerEventListener(pluginName, eventName, callback) {
     if (!this.isInitialized) throw new Error('LogosAPI must be initialized first');
-    if (!this._clientLib) throw new Error('logos-module-client not loaded; cannot register events');
+    if (!this._protocolLib) throw new Error('logos-protocol not loaded; cannot register events');
+
+    const client = this._clientFor(pluginName);
+    if (!client) throw new Error(`Failed to create protocol client for plugin: ${pluginName}`);
 
     const listenerId = this._generateCallbackId();
-    const registered = this._createRegisteredCallback(callback, listenerId);
-    this.eventListeners.set(listenerId, { pluginName, eventName, callback, registered });
-    this._client.registerEventListener(pluginName, eventName, registered, null);
+    const registered = this._createEventCallback(callback, listenerId);
+    const sub = this._lp.subscribe(client, eventName, registered, null);
+    this.eventListeners.set(listenerId, { pluginName, eventName, callback, registered, sub });
     return listenerId;
   }
 
@@ -604,39 +606,57 @@ class LogosAPI {
   }
 
   /**
-   * Create a registered koffi callback (persists beyond the C function call).
+   * Parse an lp_* JSON payload into a JS value, falling back to the raw string.
+   * @private
+   */
+  _parsePayload(json) {
+    if (json === null || json === undefined || json === '') return json;
+    try { return JSON.parse(json); } catch (_e) { return json; }
+  }
+
+  /**
+   * Create a registered koffi result callback for lp_invoke_async
+   * (persists beyond the C function call).
    * @private
    */
   _createRegisteredCallback(userCallback, callbackId) {
     const handle = koffi.register(
-      (result, message, _userData) => {
+      (ok, json, _userData) => {
         try {
-          const success = result === 1;
-          let parsedMessage;
-          try {
-            parsedMessage = JSON.parse(message);
-          } catch (_e) {
-            const match = message && message.match(/^Method call successful\. Result: (.+)$/);
-            if (match) {
-              const val = match[1];
-              if (val === 'true') parsedMessage = true;
-              else if (val === 'false') parsedMessage = false;
-              else if (!isNaN(Number(val))) parsedMessage = Number(val);
-              else parsedMessage = val;
-            } else {
-              parsedMessage = message;
-            }
-          }
-          userCallback(success, parsedMessage, {
+          userCallback(ok === 1, this._parsePayload(json), {
             callbackId,
             timestamp: new Date().toISOString(),
-            rawMessage: message
+            rawMessage: json
           });
         } catch (error) {
           console.error(`Error in callback ${callbackId}:`, error);
         }
       },
       koffi.pointer(this._AsyncCallbackProto)
+    );
+    this._registeredCallbacks.push(handle);
+    return handle;
+  }
+
+  /**
+   * Create a registered koffi event callback for lp_subscribe.
+   * @private
+   */
+  _createEventCallback(userCallback, listenerId) {
+    const handle = koffi.register(
+      (eventName, dataJson, _userData) => {
+        try {
+          userCallback(true, this._parsePayload(dataJson), {
+            listenerId,
+            eventName,
+            timestamp: new Date().toISOString(),
+            rawMessage: dataJson
+          });
+        } catch (error) {
+          console.error(`Error in event listener ${listenerId}:`, error);
+        }
+      },
+      koffi.pointer(this._LpEventCbProto)
     );
     this._registeredCallbacks.push(handle);
     return handle;
@@ -655,13 +675,9 @@ class LogosAPI {
 
   _createReflectivePluginProxy(pluginName) {
     const decapitalize = (s) => s.length ? s.charAt(0).toLowerCase() + s.slice(1) : s;
-    const makeParamsJson = (args) => {
-      const toParam = (arg, index) => {
-        const inferred = this._inferTypeAndValue(arg);
-        return { name: `arg${index}`, value: inferred.value, type: inferred.type };
-      };
-      return JSON.stringify(Array.from(args).map(toParam));
-    };
+    // lp_invoke takes a plain JSON array of positional argument values
+    // (native JSON types). The module's dispatch coerces per its signature.
+    const makeParamsJson = (args) => JSON.stringify(Array.from(args));
 
     const api = this;
 
@@ -700,22 +716,6 @@ class LogosAPI {
         });
       }
     });
-  }
-
-  _inferTypeAndValue(value) {
-    if (value === null || value === undefined) {
-      return { type: 'string', value: '' };
-    }
-    const t = typeof value;
-    if (t === 'boolean') return { type: 'bool', value: value ? 'true' : 'false' };
-    if (t === 'number') {
-      return Number.isInteger(value)
-        ? { type: 'int', value: String(value) }
-        : { type: 'double', value: String(value) };
-    }
-    if (t === 'string') return { type: 'string', value };
-    try { return { type: 'string', value: JSON.stringify(value) }; }
-    catch (_e) { return { type: 'string', value: String(value) }; }
   }
 }
 

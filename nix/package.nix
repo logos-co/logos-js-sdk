@@ -1,5 +1,5 @@
 # Package definition for logos-js-sdk
-{ pkgs, common, src, logosLiblogos, logosModuleClient, logosCapabilityModule }:
+{ pkgs, common, src, logosLiblogos, logosProtocol, logosCapabilityModule }:
 
 pkgs.stdenv.mkDerivation rec {
   inherit (common) pname version nativeBuildInputs meta;
@@ -37,10 +37,10 @@ pkgs.stdenv.mkDerivation rec {
       echo "Copied libraries from ${logosLiblogos}/lib"
     fi
 
-    # Copy liblogos_module_client from logos-module-client
-    if [ -d "${logosModuleClient}/lib" ]; then
-      cp -r "${logosModuleClient}/lib"/* $out/lib/
-      echo "Copied libraries from ${logosModuleClient}/lib"
+    # Copy liblogos_protocol (exports the lp_* C ABI) from logos-protocol
+    if [ -d "${logosProtocol}/lib" ]; then
+      cp -r "${logosProtocol}/lib"/* $out/lib/
+      echo "Copied libraries from ${logosProtocol}/lib"
     fi
 
     # Copy headers if available
