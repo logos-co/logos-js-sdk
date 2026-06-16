@@ -7,8 +7,8 @@
  * using the reflective plugin proxy API.
  *
  * Prerequisites:
- *   1. Build logos-liblogos and logos-module-client:
- *        ws build logos-liblogos logos-module-client --auto-local
+ *   1. Build logos-liblogos and logos-protocol:
+ *        ws build logos-liblogos logos-protocol --auto-local
  *
  *   2. Build the calc module:
  *        cd repos/logos-tutorial/logos-calc-module && nix build
@@ -58,7 +58,7 @@ async function main() {
   const args = parseArgs();
 
   const libPath = args.libPath || process.env.LOGOS_LIB_PATH || null;
-  const moduleClientLibPath = process.env.LOGOS_MODULE_CLIENT_LIB_PATH || null;
+  const protocolLibPath = process.env.LOGOS_PROTOCOL_LIB_PATH || null;
   const modulesDir = args.modulesDir || process.env.LOGOS_MODULES_DIR || null;
 
   console.log('=== Logos JS SDK - Calculator Module Example ===\n');
@@ -66,7 +66,7 @@ async function main() {
   // Initialize the SDK (autoInit: false so we can control the flow)
   const logos = new LogosAPI({
     libPath,
-    moduleClientLibPath,
+    protocolLibPath,
     pluginsDir: modulesDir,
     autoInit: false
   });

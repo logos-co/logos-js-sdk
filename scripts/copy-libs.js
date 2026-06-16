@@ -49,7 +49,7 @@ function findSourceDir(envVar, sdkDir) {
 function main() {
   const sdkDir = path.resolve(__dirname, '..');
   const coreDir = findSourceDir('LOGOS_LIBLOGOS_ROOT', sdkDir);
-  const clientDir = findSourceDir('LOGOS_MODULE_CLIENT_ROOT', sdkDir);
+  const protocolDir = findSourceDir('LOGOS_PROTOCOL_ROOT', sdkDir);
   const platformDir = getPlatformDir();
 
   if (!coreDir) {
@@ -76,17 +76,17 @@ function main() {
     console.warn(`  Library not found at ${libSrc}`);
   }
 
-  // Copy liblogos_module_client into lib/{platform}/
-  const clientSrcDir = clientDir || coreDir;
-  const clientSrc = path.join(clientSrcDir, 'lib', `liblogos_module_client${libExtension}`);
-  const clientDest = path.join(sdkDir, 'lib', platformDir, `liblogos_module_client${libExtension}`);
-  if (fs.existsSync(clientSrc)) {
-    if (copyFileSync(clientSrc, clientDest)) {
-      console.log(`  lib/${platformDir}/liblogos_module_client${libExtension}`);
+  // Copy liblogos_protocol into lib/{platform}/ (exports the lp_* C ABI)
+  const protocolSrcDir = protocolDir || coreDir;
+  const protocolSrc = path.join(protocolSrcDir, 'lib', `liblogos_protocol${libExtension}`);
+  const protocolDest = path.join(sdkDir, 'lib', platformDir, `liblogos_protocol${libExtension}`);
+  if (fs.existsSync(protocolSrc)) {
+    if (copyFileSync(protocolSrc, protocolDest)) {
+      console.log(`  lib/${platformDir}/liblogos_protocol${libExtension}`);
       copied++;
     }
   } else {
-    console.warn(`  liblogos_module_client not found at ${clientSrc} (optional)`);
+    console.warn(`  liblogos_protocol not found at ${protocolSrc} (optional)`);
   }
 
   // Copy logos_host into bin/{platform}/
