@@ -1,0 +1,10 @@
+module calc_js {
+  version "0.1.0"
+  description "e2e calc module (matches test/provider-fixture.js)"
+
+  method add(a: int, b: int) -> int description "Adds two integers."
+  method greet(name: tstr) -> any description "Returns a greeting object."
+  method echoBytes(v: any) -> any description "Round-trips an arbitrary value."
+
+  event ticked(n: int) description "Fires periodically with a counter."
+}

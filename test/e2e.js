@@ -67,6 +67,25 @@ async function main() {
     assert(sum2 === 42, `callSync add(40,2) === 42, got ${JSON.stringify(sum2)}`);
     console.log('OK  callSync add(40,2) =', sum2);
 
+    // (7) codegen round-trip: generate a typed client from calc.lidl and call
+    // the SAME live provider through it (needs the shared logos-lidl lib).
+    if (process.env.LOGOS_LIDL_LIB || process.env.LOGOS_LIDL_ROOT) {
+      const { parseFile } = require('../codegen/lidl.js');
+      const { generateClient } = require('../codegen/jsgen.js');
+      const genPath = path.join(require('os').tmpdir(), `calc_client_${process.pid}.js`);
+      require('fs').writeFileSync(genPath, generateClient(parseFile(path.join(__dirname, 'calc.lidl'))));
+      const { CalcJsClient } = require(genPath);
+      const typed = CalcJsClient.bind(logos);            // typed wrapper over the proxy
+      const tsum = await typed.add(20, 22);
+      assert(tsum === 42, `generated client add(20,22) === 42, got ${JSON.stringify(tsum)}`);
+      const tgen = await typed.greet('codegen');
+      assert(tgen && tgen.message === 'hello codegen', `generated greet, got ${JSON.stringify(tgen)}`);
+      require('fs').unlinkSync(genPath);
+      console.log('OK  codegen client add(20,22) =', tsum, '| greet =', JSON.stringify(tgen));
+    } else {
+      console.log('..  codegen round-trip skipped (set LOGOS_LIDL_LIB to enable)');
+    }
+
     console.log('\n=== E2E PASSED ===');
   } finally {
     logos.destroy();
