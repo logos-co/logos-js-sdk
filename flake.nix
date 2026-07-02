@@ -45,8 +45,12 @@
             npmDepsHash = "sha256-CDPBw5lbbuSOkXN7qbkhKcCHTiQ5kN/pdI+JMHPwTgc=";
             dontNpmBuild = true;
             doCheck = true;
+            # koffi's prebuilt .node needs libstdc++ resolvable at load time on
+            # Linux (nix has no default lib path); harmless on Darwin.
+            buildInputs = [ pkgs.stdenv.cc.cc.lib ];
             checkPhase = ''
               runHook preCheck
+              export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
               export LOGOS_PROTOCOL_LIB=${protocolShared}/lib/liblogos_protocol.${e}
               export LOGOS_LIDL_LIB=${lidlShared}/lib/liblogos_lidl_c.${e}
               node test/e2e.js
