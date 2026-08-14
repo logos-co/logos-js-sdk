@@ -22,8 +22,27 @@ async function waitReady(child) {
 async function main() {
   console.log('logos-protocol', protocolVersion());
 
+  // The provider child gets its OWN liblogos_protocol when LOGOS_E2E_PROVIDER_LIB
+  // is set. The two halves of this SDK have different upstream requirements —
+  // the consumer needs only the merged shared library (logos-protocol#4), the
+  // provider needs the C ABI to actually serve (logos-protocol#12, still open) —
+  // so being able to run each half against a DIFFERENT protocol build is what
+  // lets you attribute a failure to a half instead of to "the protocol".
+  //
+  //   LOGOS_PROTOCOL_LIB=<protocol master>  \
+  //   LOGOS_E2E_PROVIDER_LIB=<provider-capable protocol>  node test/e2e.js
+  //
+  // exercises the consumer against master. Unset, both halves share one build
+  // and this is an ordinary single-protocol e2e.
+  const providerLib = process.env.LOGOS_E2E_PROVIDER_LIB;
+  if (providerLib) console.log('provider child protocol lib:', providerLib);
+
   const prov = spawn(process.execPath, [path.join(__dirname, 'provider-fixture.js')], {
-    env: { ...process.env, LOGOS_E2E_PORT: String(PORT) },
+    env: {
+      ...process.env,
+      LOGOS_E2E_PORT: String(PORT),
+      ...(providerLib ? { LOGOS_PROTOCOL_LIB: providerLib } : {}),
+    },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   await waitReady(prov);

@@ -67,9 +67,47 @@ introspection, an event, a sync call, and a `.lidl`→JS codegen round-trip — 
 over a plain transport with no Qt loop. It also runs hermetically as
 `nix flake check` (`checks.<system>.e2e`).
 
+`LOGOS_E2E_PROVIDER_LIB` gives the provider **child** its own
+`liblogos_protocol`, so each half can be exercised against a different protocol
+build. Because the two halves have different upstream requirements (see below),
+this is what attributes a failure to a half rather than to "the protocol":
+
+```sh
+LOGOS_PROTOCOL_LIB=<protocol master>/lib/liblogos_protocol.dylib \
+LOGOS_E2E_PROVIDER_LIB=<provider-capable protocol>/lib/liblogos_protocol.dylib \
+  npm test          # consumer half, run against protocol master
+```
+
 ## Status / limitations
 
 - Provider method handlers are **synchronous** (return a value, not a Promise).
   Async request/response awaits a deferred-reply ABI.
-- Requires a logos-protocol with the Qt-free `lp_provider_*`/`lp_client_*` path
-  and a shared `liblogos_protocol`, and a shared `liblogos_lidl_c` for codegen.
+
+### What each half needs from logos-protocol
+
+The two halves of this SDK have *different* upstream requirements, and the flake
+pin is driven by the stricter one:
+
+| half | needs | on logos-protocol master? |
+|---|---|---|
+| consumer (`LogosClient`, `lp_client_*`) | a shared `liblogos_protocol` + a Qt-free plain transport | **yes** — verified: async call, event, `getMethods`, `callSync` all round-trip |
+| provider (`Provider`, `lp_provider_*`) | the C ABI actually *serving* a module | **no** — logos-protocol#12 is still open |
+
+The shared library is merged (logos-protocol#4): master installs
+`$out/lib/liblogos_protocol.{so,dylib}` in the ordinary `logos-protocol` /
+`logos-protocol-lib` package, alongside the static archive. It is *not* a
+separate package there, so `flake.nix` resolves
+`logos-protocol-shared or logos-protocol` and works against either pin.
+
+Serving is not. On master `lp_provider_register()` returns `LP_OK`, stores the
+callbacks and opens no socket; `lp_provider_emit_event` / `lp_provider_save_token`
+return `LP_ERR_UNSUPPORTED`. `Provider.register()` probes for exactly that and
+throws a descriptive error instead of letting it surface as a consumer-side
+"Connection refused" 30 s later. Until logos-protocol#12–#16 merge, `flake.nix`
+pins the branch at the tip of that stack; flipping it to master afterwards is a
+one-line change.
+
+Codegen additionally needs a shared `liblogos_lidl_c` (logos-lidl#6, also still
+open — master builds only a static `logos_lidl_c`). The e2e skips the codegen
+round-trip when `LOGOS_LIDL_LIB` is unset, so the rest of the suite does not
+depend on it.
