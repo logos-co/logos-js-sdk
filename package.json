@@ -1,19 +1,20 @@
 {
-  "name": "logos-api",
-  "version": "1.0.0",
-  "description": "JavaScript SDK for interacting with liblogos_core",
+  "name": "logos-js-sdk",
+  "version": "2.0.0",
+  "description": "Protocol-native, Qt-free JavaScript SDK for Logos (lp_* consumer + provider over koffi)",
   "main": "index.js",
+  "bin": {
+    "logos-lidl-gen-js": "codegen/cli.js"
+  },
   "scripts": {
-    "test": "node example/calc-example.js",
-    "copy-libs": "node scripts/copy-libs.js",
-    "prepublishOnly": "node scripts/copy-libs.js"
+    "test": "node test/e2e.js"
   },
   "files": [
     "index.js",
+    "src/",
+    "codegen/",
     "README.md",
     "lib/",
-    "bin/",
-    "scripts/",
     "flake.nix",
     "flake.lock",
     "nix/"
@@ -21,10 +22,11 @@
   "keywords": [
     "logos",
     "ffi",
-    "core",
-    "plugins",
-    "chat",
-    "waku"
+    "koffi",
+    "lp",
+    "protocol",
+    "module",
+    "lidl"
   ],
   "author": "Logos Team",
   "license": "MIT",

@@ -1,147 +1,113 @@
-NOTE: This is very WIP
+# logos-js-sdk
 
-# Logos API - JavaScript SDK
+A **protocol-native, Qt-free** JavaScript SDK for Logos: a thin [koffi](https://koffi.dev)
+wrapper over the logos-protocol `lp_*` C ABI. A Node process is an out-of-process
+**consumer** (`lp_client_*`) and/or **provider** (`lp_provider_*`) over a *plain*
+transport — plain TCP, TCP+SSL, or a plain-local Unix socket. There is **no
+embedded Qt host and no Qt event loop**.
 
-A JavaScript SDK for interacting with liblogos_core and liblogos_module_client, providing a clean abstraction over FFI functionality for plugin management, async operations, and event handling.
+It loads a shared `liblogos_protocol` directly; it does not use `liblogos_core`.
 
-Uses [koffi](https://koffi.dev/) for FFI (supports Node.js 16+, including v24).
+## Consume a module
 
-## Architecture
+```js
+const { LogosClient, tcp } = require('logos-js-sdk');
 
-The SDK loads two native libraries:
-- **liblogos_core** — core lifecycle, plugin management, event processing
-- **liblogos_module_client** — async method calls, event listeners (proxy API)
+const logos = new LogosClient('my_app', { transport: tcp('127.0.0.1', 6001) });
+const calc  = logos.module('calc_module');
 
-The module client is initialized with host callbacks that bridge back to the core, so it can query plugin state (is loaded, is known, load plugin).
+const sum = await calc.call('add', 5, 3);         // async → Promise
+const off = calc.on('computed', (v) => { … });    // event subscription (off() to stop)
+const iface = calc.getMethods();                   // introspection
+```
 
-## Basic Usage
+## Provide a module
 
-```javascript
-const LogosAPI = require('logos-api');
+```js
+const { Provider, tcp } = require('logos-js-sdk');
 
-// Initialize with custom options
-const logos = new LogosAPI({
-  libPath: '/path/to/liblogos_core.so',
-  moduleClientLibPath: '/path/to/liblogos_module_client.so',  // optional
-  pluginsDir: '/path/to/modules',
-  autoInit: false
+const p = new Provider('greeter', tcp('127.0.0.1', 6002));
+p.register({
+  handlers: { hello: (name) => `hi ${name}` },     // synchronous handlers
+  events: ['greeted'],
 });
-
-logos.init();
-logos.start();
-logos.startEventProcessing(50);
-
-// Load a plugin
-logos.processAndLoadPlugin('calc_module');
-
-// Call methods via reflective proxy (returns Promise)
-const result = await logos.calc_module.add(5, 3);
-console.log('5 + 3 =', result);
-
-// Or use the low-level API
-logos.callPluginMethodAsync('calc_module', 'add', JSON.stringify([
-  { name: 'a', value: '5', type: 'int' },
-  { name: 'b', value: '3', type: 'int' }
-]), (success, message, meta) => {
-  console.log('Result:', message);
-});
-
-// Register event listener
-logos.registerEventListener('chat', 'chatMessage', (success, message) => {
-  console.log('Event:', message);
-});
-
-// Or via proxy
-logos.chat.onChatMessage((message) => console.log('Chat:', message));
-
-// Cleanup
-logos.cleanup();
+p.saveToken('caller_module', authToken);            // authorize a caller
+p.emit('greeted', 'world');
 ```
 
-## API Reference
+## Typed bindings from a `.lidl` contract
 
-### Constructor Options
-
-```javascript
-{
-  libPath: string,              // Path to liblogos_core library
-  moduleClientLibPath: string,  // Path to liblogos_module_client (optional)
-  pluginsDir: string,           // Plugins directory
-  logosHostPath: string,        // Path to logos_host binary
-  autoInit: boolean             // Auto-initialize on construction (default: true)
-}
+```sh
+logos-lidl-gen-js calc.lidl            > calc_client.js      # typed consumer client
+logos-lidl-gen-js calc.lidl --provider > calc_provider.js    # provider scaffold
 ```
 
-### Core Methods
+The generated client wraps each method as `async fn(...) → Promise` and each event
+as `on<Event>(handler)`. The provider scaffold gives an impl-class stub and a
+`serve(transports, impl)` factory. Codegen reuses logos-lidl's canonical grammar
+via its C ABI (no JS re-implementation).
 
-- `init()` - Initialize the library
-- `start()` - Start the LogosCore system
-- `cleanup()` - Clean up and shutdown
-- `exec()` - Execute blocking event loop
+## Finding the native libraries
 
-### Plugin Management
+The SDK loads `liblogos_protocol.{so,dylib}` and (for codegen) `liblogos_lidl_c`.
+Point it at them with `LOGOS_PROTOCOL_LIB` / `LOGOS_LIDL_LIB` (explicit paths) or
+`LOGOS_PROTOCOL_ROOT` / `LOGOS_LIDL_ROOT` (a prefix with `lib/`), or drop them in
+`./lib/`. The Nix dev shell sets these for you:
 
-- `getLoadedPlugins()` - Get array of loaded plugin names
-- `getKnownPlugins()` - Get array of known plugin names
-- `getPluginStatus()` - Get object with loaded and known plugins
-- `processPlugin(pluginName)` - Process a plugin file
-- `loadPlugin(pluginName)` - Load a plugin
-- `unloadPlugin(pluginName)` - Unload a plugin
-- `loadPluginWithDependencies(pluginName)` - Load with dependency resolution
-- `addPluginsDir(dir)` - Add additional plugins directory
-- `processAndLoadPlugin(pluginName)` - Process and load in one step
-- `processAndLoadPlugins(pluginNames[])` - Process and load multiple plugins
-- `getToken(key)` - Get a token by key
-- `getModuleStats()` - Get module CPU/memory stats
-
-### Async Operations (via logos-module-client)
-
-- `callPluginMethodAsync(pluginName, methodName, params, callback)` - Call plugin method
-- `registerEventListener(pluginName, eventName, callback)` - Register event listener
-
-### Event Processing
-
-- `startEventProcessing(interval)` - Start event processing loop (default: 100ms)
-- `stopEventProcessing()` - Stop event processing loop
-
-### Reflective Proxy
-
-Access any loaded plugin as a property: `logos.pluginName.method(args)` returns a Promise.
-
-Event subscription: `logos.pluginName.onEventName(callback)`.
-
-## Requirements
-
-- Node.js 18+
-- liblogos_core and logos_host binaries
-- liblogos_module_client (optional, needed for async method calls)
-
-## Setting Up Binaries
-
-Run `nix run .#copy-libs` on each target platform:
-
-```bash
-cd logos-js-sdk
-nix build
-nix run .#copy-libs
+```sh
+nix develop      # exports LOGOS_PROTOCOL_LIB / LOGOS_LIDL_LIB, provides node
+npm ci && npm test
 ```
 
-This copies `liblogos_core`, `liblogos_module_client`, and `logos_host` into platform subdirectories:
+## Test
 
+`npm test` runs `test/e2e.js`: a Node provider (child process) and a Node
+consumer exchange async calls, an object result, a `{_bytes}` round-trip,
+introspection, an event, a sync call, and a `.lidl`→JS codegen round-trip — all
+over a plain transport with no Qt loop. It also runs hermetically as
+`nix flake check` (`checks.<system>.e2e`).
+
+`LOGOS_E2E_PROVIDER_LIB` gives the provider **child** its own
+`liblogos_protocol`, so each half can be exercised against a different protocol
+build. Because the two halves have different upstream requirements (see below),
+this is what attributes a failure to a half rather than to "the protocol":
+
+```sh
+LOGOS_PROTOCOL_LIB=<protocol master>/lib/liblogos_protocol.dylib \
+LOGOS_E2E_PROVIDER_LIB=<provider-capable protocol>/lib/liblogos_protocol.dylib \
+  npm test          # consumer half, run against protocol master
 ```
-lib/
-  darwin-arm64/liblogos_core.dylib
-  darwin-arm64/liblogos_module_client.dylib
-  linux-x64/liblogos_core.so
-  linux-x64/liblogos_module_client.so
-bin/
-  darwin-arm64/logos_host
-  linux-x64/logos_host
-```
 
-### Library Resolution Order
+## Status / limitations
 
-1. `sdk/lib/{platform}/` — multi-platform layout
-2. `sdk/lib/` — single-platform fallback
-3. `LOGOS_LIBLOGOS_ROOT` / `LOGOS_MODULE_CLIENT_ROOT` env vars
-4. `sdk/result/` — nix build symlink
+- Provider method handlers are **synchronous** (return a value, not a Promise).
+  Async request/response awaits a deferred-reply ABI.
+
+### What each half needs from logos-protocol
+
+The two halves of this SDK have *different* upstream requirements, and the flake
+pin is driven by the stricter one:
+
+| half | needs | on logos-protocol master? |
+|---|---|---|
+| consumer (`LogosClient`, `lp_client_*`) | a shared `liblogos_protocol` + a Qt-free plain transport | **yes** — verified: async call, event, `getMethods`, `callSync` all round-trip |
+| provider (`Provider`, `lp_provider_*`) | the C ABI actually *serving* a module | **no** — logos-protocol#12 is still open |
+
+The shared library is merged (logos-protocol#4): master installs
+`$out/lib/liblogos_protocol.{so,dylib}` in the ordinary `logos-protocol` /
+`logos-protocol-lib` package, alongside the static archive. It is *not* a
+separate package there, so `flake.nix` resolves
+`logos-protocol-shared or logos-protocol` and works against either pin.
+
+Serving is not. On master `lp_provider_register()` returns `LP_OK`, stores the
+callbacks and opens no socket; `lp_provider_emit_event` / `lp_provider_save_token`
+return `LP_ERR_UNSUPPORTED`. `Provider.register()` probes for exactly that and
+throws a descriptive error instead of letting it surface as a consumer-side
+"Connection refused" 30 s later. Until logos-protocol#12–#16 merge, `flake.nix`
+pins the branch at the tip of that stack; flipping it to master afterwards is a
+one-line change.
+
+Codegen additionally needs a shared `liblogos_lidl_c` (logos-lidl#6, also still
+open — master builds only a static `logos_lidl_c`). The e2e skips the codegen
+round-trip when `LOGOS_LIDL_LIB` is unset, so the rest of the suite does not
+depend on it.

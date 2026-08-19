@@ -1,0 +1,38 @@
+name: CI
+
+# pull_request is unfiltered: stacked PRs (based on other feature branches)
+# must run CI too.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # DeterminateSystems' installer: reliable on the macOS runners, where
+      # cachix/install-nix-action trips over pre-existing nix build users.
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: cachix/cachix-action@v15
+        continue-on-error: true
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # Builds this system's `checks.<system>.e2e`: a hermetic run where a Node
+      # provider (child process) and a Node consumer exchange calls + events
+      # over a plain transport, plus a .lidl→JS codegen round-trip — all with no
+      # liblogos_core and no Qt event loop. koffi's prebuilt binary ships in the
+      # npm package, so nothing is compiled in the sandbox.
+      - name: e2e (protocol-native provider ↔ consumer, Qt-free)
+        run: nix flake check -L
